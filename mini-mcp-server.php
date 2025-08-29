@@ -3,7 +3,7 @@
 /*
  *        (( MMCP ))
  *      Mini-MCP Server
- *       version 1.0.0
+ *       version 1.1.0
  *
  * A simplified MCP Server for PHP
  *
@@ -33,13 +33,12 @@
  *
  ********************************************************************************
  *
- * Procedural PHP implementation of an HTTP-streamable MCP server
- * to standard HTTP/S port, via the endpoint of your choice
- * ("/mcp/" is common, default is "/".) The code is based on the
- * Python SDK FastMCP.
+ * Procedural PHP implementation of an MCP server supporting
+ * both streamable-HTTP (to standard HTTP/S port, via the endpoint
+ * of your choice, default is "/") and STDIO transport.
  *
- * Neither STDIO or SSE is supported with Mini-MCP, nor is OAuth.
- * Mini-MPC's tool definitions allow for titles, annotations,
+ * OAuth is not supported with this version of Mini-MCP. This
+ * server's tool definitions allow for titles, annotations,
  * and output schemas with their corresponding stuctured content
  * (as supported by protocol version 2025-06-18.) Note that both
  * output schemas and structured content will be dropped for
@@ -59,16 +58,22 @@
  * Be sure that every tool has both the tool function, and a
  * corresponding "mmcp_tool_registry_<funcname>" function to
  * "register" the tool (just returning the data necessary to
- * fulfill the "tools/list" request.) At the end of the file,
- * execute the "mmcp_main()" function.
+ * fulfill the "tools/list" request.) In tool descriptions for
+ * potentially long-running tools, note the expected runtime.
+ * Adjust global variables $MMCP_MCP_ENDPOINT, $MMCP_SERVER_NAME,
+ * $MMCP_SERVER_VERSION, then adjust $MMCP_REQUEST_TIMEOUT if you
+ * wish to wait longer (or not as long) for viable new messages,
+ * and finally set $MMCP_TRANSPORT_METHOD to either 'HTTP' or
+ * 'STDIO' as desired. After all these are set, start the server
+ * by executing "mmcp_main()".
  *
- * Also be sure to set $SERVER_NAME and $SERVER_VERSION, and
- * to set $MAX_CONNECTION_UPTIME to a new value if the default of
- * 24 hours isn't appropriate. (Also, $MCP_ACCESS_LOG_FILE,
- * $MCP_ERROR_LOG_FILE and $CONNECTION_TMP_DIR should also be
+ * Also be sure to set $MMCP_MAX_CONNECTION_UPTIME to a new value
+ * if the default of 24 hours isn't appropriate. (Also,
+ * $MMCP_ACCESS_LOG_FILE, $MMCP_DEBUG_LOG_FILE,
+ * $MMCP_ERROR_LOG_FILE and $CONNECTION_TMP_DIR should also be
  * set again if the defaults aren't suitable.) Note that
  * connection data is maintained for a length of time past
- * closing equal to $MAX_CONNECTION_UPTIME.
+ * closing equal to $MMCP_MAX_CONNECTION_UPTIME.
  *
  * Connection data is stored in files in a temp folder. Each
  * connection is a single file; the name of the file is:
@@ -94,11 +99,14 @@
  *      in tool call content -->
  *      https://modelcontextprotocol.io/specification/2025-06-18/server/tools
  *    - Add support for annotations (excludes earliest protocol version)
- *    - Add support for the 2024-11-05 version (and SSE-side events) -->
+ *    - Add progress notifications for HTTP transport?
+ *    - Possibly add support for the 2024-11-05 version (and SSE-side events) -->
  *      https://modelcontextprotocol.io/specification/2024-11-05/basic/transports
  *
  *
- * Completed 2025-08-13 by RDJ (rodjacksonx@gmail.com, rod@wgsusa.com)
+ * v.1.0.0 - Completed 2025-08-13 by RDJ (rodjacksonx@gmail.com, rod@wgsusa.com)
+ *
+ * v.1.1.0 - Added STDIO transport; completed 2025-??-?? by RDJ
  *
  *
  */
@@ -120,8 +128,8 @@ ini_set('display_errors', 1);
 const TEST_API_ENDPOINT = 'https://wgsapi.com/xtuple-api/xtuple-test.php?apikey=';
 const MMCP_DEFAULT_MCP_ENDPOINT = '/mini-mcp-server.php'; // should just be the path after the hostname
 
-const ONE_DAY_IN_SECONDS = 86400; // 86,400 seconds = 1440 minutes = 24 hours
-const ONE_MINUTE_IN_SECONDS = 60;
+const MMCP_ONE_DAY_IN_SECONDS = 86400; // 86,400 seconds = 1440 minutes = 24 hours
+const MMCP_ONE_MINUTE_IN_SECONDS = 60;
 
 const MMCP_LOG_TIMESTAMP = 'Y-m-d H:i:s';
 
@@ -163,8 +171,12 @@ const MMCP_PROTOCOL_HEADER_LABELS = [
 ];
 const MMCP_PROTOCOL_HTTP_HEADER = 'HTTP_MCP_PROTOCOL_VERSION';
 
+const MMCP_SUPPORTED_TRANSPORT_METHODS = ['HTTP', 'STDIO'];
+const MMCP_SUPPORTED_TRANSPORT_METHODS_STR = 'HTTP, STDIO';
+
 const MMCP_TOOL_REGISTRY_FUNCTION_PREFIX = 'mmcp_tool_registry_';
 const MMCP_ENDPOINT_REGISTRY_FUNCTION_PREFIX = 'mmcp_endpoint_registry_';
+const MMCP_TOOL_TIMING_FUNCTION_PREFIX = 'mmcp_tool_timing_';
 
 const MMCP_CID_OPEN = 'O'; // connection is open and ready for use
 const MMCP_CID_CLOSED = 'C'; // connection is closed and inaccessible
@@ -306,8 +318,8 @@ function MMCP_DEFAULT_INITIALIZE_ERROR_OBJ()
 
 $MMCP_MCP_ENDPOINT = MMCP_DEFAULT_MCP_ENDPOINT;
 
-$MMCP_MAX_CONNECTION_UPTIME = ONE_DAY_IN_SECONDS;
-$MMCP_REQUEST_TIMEOUT = ONE_MINUTE_IN_SECONDS; // mainly used for initialization confirmation
+$MMCP_MAX_CONNECTION_UPTIME = MMCP_ONE_DAY_IN_SECONDS;
+$MMCP_REQUEST_TIMEOUT = MMCP_ONE_MINUTE_IN_SECONDS; // mainly used for initialization confirmation
 
 $MMCP_SERVER_NAME = MMCP_SERVER_NAME_DEFAULT;
 $MMCP_SERVER_VERSION = MMCP_SERVER_VERSION_DEFAULT;
@@ -319,6 +331,10 @@ $MMCP_DEBUG_LOG_FILE = MMCP_DEBUG_LOG_FILENAME;
 $MMCP_CONNECTION_TMP_DIR = MMCP_CONNECTION_TMP_DIRECTORY;
 
 $MMCP_CURRENT_PROTOCOL_VERSION = MMCP_DEFAULT_PROTOCOL_VERSION;
+
+$MMCP_TRANSPORT_METHOD = ""; // forces servers to specify their transport method
+
+$MMCP_GLOBAL_CID = -1; // for STDIO, the global CID
 
 
 // --------------------------- //
@@ -352,10 +368,27 @@ function mmcp_close_connection($cid)
 // flushing out buffers afterwards
 function mmcp_send_response($txt)
 {
-    echo($txt);
+    global $MMCP_TRANSPORT_METHOD;
+    $tail = "";
+
+    if ($MMCP_TRANSPORT_METHOD == 'STDIO')
+        $tail = "\n";
+
+    echo($txt.$tail);
     flush();
-    //if (function_exists('ob_flush'))
-        //ob_flush();
+}
+
+// verifies that the given transport method is one
+// that is supported; returns TRUE or FALSE
+function mmcp_validate_transport_method($transport)
+{
+    if (!is_string($transport))
+        return FALSE;
+
+    if (!in_array($transport, MMCP_SUPPORTED_TRANSPORT_METHODS))
+        return FALSE;
+    else
+        return TRUE;
 }
 
 // verifies that the connection exists and
@@ -400,10 +433,28 @@ function mmcp_update_connection($cid, $status)
     return $prior_status;
 }
 
+// indicates to the client of an HTTP transport
+// exchange that the tool usage may take up to
+// the specified number of seconds
+function mmcp_establish_tooltime($seconds)
+{
+    if ((!is_numeric($seconds)) or (!is_integer($seconds+0)))
+        return;
+
+    $duration = $seconds + 0;
+    header("Mcp-Expected-Duration: $duration");
+}
+
 // sets up the initial headers to be sent for the HTTP
 // response, BEFORE anything is relayed to the client
 function mmcp_establish_headers($sid = "", $pv = "")
 {
+    global $MMCP_TRANSPORT_METHOD;
+
+    // this is only for http
+    if ($MMCP_TRANSPORT_METHOD != 'HTTP')
+        return;
+
     // CORS headers for browser access
     header('Access-Control-Allow-Origin: *');
     header('Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS');
@@ -536,6 +587,48 @@ function mmcp_log_error($json_response)
     return $bytes_written;
 }
 
+// determines the maximum time among all long-
+// running tools for the script to be expected
+// to run, utiliizing tools that created a
+// mmcp_tool_timing hook; if none are found,
+// presumes $MMCP_MAX_CONNECTION_UPTIME
+function mmcp_maximum_tool_timing()
+{
+    global $MMCP_MAX_CONNECTION_UPTIME;
+
+    // init
+    $all_timings = [];
+    $max_timing = $MMCP_MAX_CONNECTION_UPTIME;
+    $prefix_len = strlen(MMCP_TOOL_TIMING_FUNCTION_PREFIX);
+
+    // find all existing functions whose names
+    // start with the tool timing prefix; loop
+    // through them to extract the maximum one
+    $all_funcs = get_defined_functions();
+    $all_user_funcs = $all_funcs['user'];
+    foreach ($all_user_funcs as $user_func)
+    {
+        // make sure func name matches the prefix
+        if (strpos($user_func, MMCP_TOOL_TIMING_FUNCTION_PREFIX) === 0)
+        {
+            // but also has to be longer than the prefix
+            if (strlen($user_func) > $prefix_len)
+            {
+                $timing_func = $user_func;
+                $timeout = (integer) $timing_func();
+                if ($timeout > 0)
+                    $all_timings[] = $timeout;
+            }
+        }
+    }
+
+    if (count($all_timings) > 0)
+        $max_timing = max($all_timings);
+
+    // return the final result
+    return $max_timing;
+}
+
 // constructs an JSON-ified array of all custom
 // endpoints supported by the server; all custom
 // endpoints must have a custom function (cfunc)
@@ -661,6 +754,22 @@ function mmcp_extract_connection_id()
 
 
 // ---------- Minor Functions ---------- //
+
+// cleans up everything 
+function mmcp_shutdown_stdio()
+{
+    global $MMCP_GLOBAL_CID;
+
+    if ($MMCP_GLOBAL_CID != -1)
+        mmcp_close_connection($MMCP_GLOBAL_CID);
+
+    mmcp_clear_old_connections();
+
+    $msg = "Shutting down STDIO server for connection $MMCP_GLOBAL_CID.";
+    mmcp_log_debug($msg);
+
+    return 0;
+}
 
 // clears out connections that are expired
 // (they exist and were started two connection
@@ -894,13 +1003,14 @@ function mmcp_handle_initialize($request)
 {
     // globals
     global $MMCP_CONNECTION_TMP_DIR, $MMCP_CURRENT_PROTOCOL_VERSION;
-    global $MMCP_SERVER_NAME, $MMCP_SERVER_VERSION;
+    global $MMCP_SERVER_NAME, $MMCP_SERVER_VERSION, $MMCP_TRANSPORT_METHOD;
+    global $MMCP_GLOBAL_CID;
 
     // inits
     $success = TRUE;
 
-    // client must NOT send a Mcp-Session-Id header during initialization
-    if (isset($_SERVER['HTTP_MCP_SESSION_ID']))
+    // iff HTTP, client must NOT send a Mcp-Session-Id header during initialization
+    if (($MMCP_TRANSPORT_METHOD == 'HTTP') and (isset($_SERVER['HTTP_MCP_SESSION_ID'])))
         return FALSE;
 
     // verify that the request is sound
@@ -938,11 +1048,16 @@ function mmcp_handle_initialize($request)
     // acknowledge the protocol version
     $MMCP_CURRENT_PROTOCOL_VERSION = $server_pv;
 
-    // generate the session ID & establish headers
+    // generate the session ID & for HTTP, establish headers
     $sid = bin2hex(random_bytes(16)); //session_id();
-    session_id($sid);
-    session_start();
-    mmcp_establish_headers($sid, $server_pv);
+    if ($MMCP_TRANSPORT_METHOD == 'HTTP')
+    {
+        session_id($sid);
+        session_start();
+        mmcp_establish_headers($sid, $server_pv);
+    }
+    elseif ($MMCP_TRANSPORT_METHOD == 'STDIO')
+        $MMCP_GLOBAL_CID = $sid;
 
     // setup the connection file
     $fn = mmcp_construct_connection_filename($sid);
@@ -967,22 +1082,24 @@ function mmcp_handle_initialize($request)
     //$response['result']['connectionData'] = $connection_data; // for debugging
 
     // send the response
-    http_response_code(200); // request accepted and successfully processed
+    if ($MMCP_TRANSPORT_METHOD == 'HTTP')
+        http_response_code(200); // request accepted and successfully processed
     $json_response = json_encode($response);
     mmcp_send_response($json_response);
-    mmcp_log_access($sid, $rid, $json_response, false);
+    mmcp_log_access($sid, $rid, $json_response, false); // not a request
 
     // return T or F based on
     // whether everything is good
     return $success;
-}
+
+} // end mmcp_handle_initialize()
 
 // given a seemingly-valid request, and the connection ID,
 // processes the request as appropriate to the main endpoint;
 // handles pings, notifications, tool/call and tool/list
 function mmcp_process_request($request, $cid)
 {
-    global $MMCP_CURRENT_PROTOCOL_VERSION;
+    global $MMCP_CURRENT_PROTOCOL_VERSION, $MMCP_TRANSPORT_METHOD;
 
     // Extract core request components
     $rid = $request['id'] ?? null;
@@ -990,7 +1107,8 @@ function mmcp_process_request($request, $cid)
     $params = $request['params'] ?? [];
 
     // Set up proper headers for the response
-    mmcp_establish_headers($cid, $MMCP_CURRENT_PROTOCOL_VERSION);
+    if ($MMCP_TRANSPORT_METHOD == 'HTTP')
+        mmcp_establish_headers($cid, $MMCP_CURRENT_PROTOCOL_VERSION);
 
     // Route to proper function based on method
 
@@ -1030,7 +1148,7 @@ function mmcp_process_request($request, $cid)
             mmcp_send_response($json_response);
 
         // can match a request, so log it as a response too
-        mmcp_log_access($cid, $rid, $json_response, false);
+        mmcp_log_access($cid, $rid, $json_response, false); // F = response, not request
     }
 
     // tools/call
@@ -1078,7 +1196,7 @@ function mmcp_process_request($request, $cid)
             mmcp_send_response($json_response);
 
         // can match a request, so log it as a response too
-        mmcp_log_access($cid, $rid, $json_response, false);
+        mmcp_log_access($cid, $rid, $json_response, false); // F = response, not request
     }
 
     // notifications
@@ -1088,9 +1206,10 @@ function mmcp_process_request($request, $cid)
         $response = mmcp_handle_notification($method, $params, $cid, $rid);
 
         // notifications don't send a response
-        // other than an HTTP 202 OK if all good,
-        // or some other value if an error
-        if ($response === 202)
+        // other than an HTTP 202 "accepted"
+        // if all good, or some other value if
+        // there was a processing error
+        if (($MMCP_TRANSPORT_METHOD == 'HTTP') and ($response === 202))
             http_response_code($response);
     }
 
@@ -1106,11 +1225,11 @@ function mmcp_process_request($request, $cid)
         $json_response = json_encode($response);
         mmcp_send_error($json_response);
         // can match a request, so log it as a response too
-        mmcp_log_access($cid, $rid, $json_response, false);
+        mmcp_log_access($cid, $rid, $json_response, false); // F = response, not request
     }
 
-    // finished with main inner function!
-    return;
+    // successfully finished with main inner function!
+    return 0;
 
 } // end mmcp_process_request()
 
@@ -1137,16 +1256,68 @@ function mmcp_handle_notification($method, $params, $cid, $rid)
 }
 
 
-// -------------------------- //
-// ---------- MAIN ---------- //
-// -------------------------- //
+// --------------------------- //
+// ---------- MAINS ---------- //
+// --------------------------- //
+
+// ---------- THE MAIN ---------- //
 
 function mmcp_main()
 {
-    global $MMCP_MCP_ENDPOINT, $MMCP_ACCESS_LOG_FILE, $MMCP_ERROR_LOG_FILE, $MMCP_CURRENT_PROTOCOL_VERSION;
+    global $MMCP_MCP_ENDPOINT, $MMCP_ACCESS_LOG_FILE, $MMCP_ERROR_LOG_FILE;
+    global $MMCP_TRANSPORT_METHOD, $MMCP_CURRENT_PROTOCOL_VERSION;
+
+    // ---------- initialization ---------- //
+
+    // we have to have a transport method established
+    if ($MMCP_TRANSPORT_METHOD === "")
+    {
+        mmcp_log_debug('Server has not established a transport method (valid methods are: '.
+            MMCP_SUPPORTED_TRANSPORT_METHODS_STR.')');
+        exit();
+    }
+    elseif (!mmcp_validate_transport_method($MMCP_TRANSPORT_METHOD))
+    {
+        mmcp_log_debug('Server attempted to establish invalid transport method ('.
+            ((string)$MMCP_TRANSPORT_METHOD).')');
+        exit();
+    }
+
+    $exitcode = 0; // logically redundant, but we'll include it just in case
+
+    // ---------- launch transport method ---------- //
 
     // First, clean up old connections
     mmcp_clear_old_connections();
+
+    // Then, if we're an HTTP server, process the next request
+    if ($MMCP_TRANSPORT_METHOD == 'HTTP')
+        $exitcode = mmcp_main_http();
+    // Or if we're an STDIO server, enter the STDIO process loop
+    elseif ($MMCP_TRANSPORT_METHOD == 'STDIO')
+        $exitcode = mmcp_main_stdio();
+
+    // ---------- finished ---------- //
+
+    exit($exitcode);
+
+} // end mmcp_main()
+
+
+// ---------- MAIN (HTTP) ---------- //
+
+// simple -1 returned for any errors that prevented proper
+// communication with the client, otherwise returns 0
+function mmcp_main_http()
+{
+    global $MMCP_MCP_ENDPOINT, $MMCP_ACCESS_LOG_FILE, $MMCP_ERROR_LOG_FILE;
+    global $MMCP_TRANSPORT_METHOD, $MMCP_CURRENT_PROTOCOL_VERSION;
+    global $MMCP_MAX_CONNECTION_UPTIME, $MMCP_REQUEST_TIMEOUT;
+
+    // limit script runtime for efficiency
+    $maxtime = mmcp_maximum_tool_timing();
+    $tooltime = min($maxtime, $MMCP_MAX_CONNECTION_UPTIME);
+    set_time_limit($tooltime);
 
     // Get the request method, URI and any connection ID
     $method = $_SERVER['REQUEST_METHOD'];
@@ -1164,7 +1335,7 @@ function mmcp_main()
     {
         mmcp_establish_headers();
         http_response_code(204); // No Content
-        exit();
+        return 0;
     }
 
     // Normalize the core MCP endpoint - handle variations
@@ -1197,7 +1368,7 @@ function mmcp_main()
             mmcp_send_error(json_encode($error));
         }
 
-        exit();
+        return 0;
     }
 
     // This is a core endpoint MCP protocol request; carry on
@@ -1211,7 +1382,7 @@ function mmcp_main()
             http_response_code(400); // Bad Request
             $error = ['error' => 'No session to close'];
             mmcp_send_error(json_encode($error));
-            exit();
+            return 0;
         }
             
         // Close the connection
@@ -1232,7 +1403,7 @@ function mmcp_main()
             $error = ['error' => 'Session not found or already closed'];
             mmcp_send_error(json_encode($error));
         }
-        exit();
+        return 0;
     }
 
     // We already did CORS preflight handling,
@@ -1262,7 +1433,7 @@ function mmcp_main()
         header('Allow: POST, DELETE');
         $error = ['error' => "Method '$method' not allowed. MCP protocol requires POST requests."];
         mmcp_send_error(json_encode($error));
-        exit();
+        return 0;
     }
 
     // Read the request body
@@ -1272,7 +1443,7 @@ function mmcp_main()
         http_response_code(400); // Bad Request
         $error = ['error' => 'Empty request body'];
         mmcp_send_error(json_encode($error));
-        exit();
+        return 0;
     }
 
     // Validate the request first
@@ -1289,7 +1460,7 @@ function mmcp_main()
         $error = ['error' => 'Invalid JSON in request body'];
         $json_error = json_encode($error);
         mmcp_send_error($json_error);
-        exit();
+        return 0;
     }
 
     // Extract request ID if available (even from invalid requests)
@@ -1312,7 +1483,7 @@ function mmcp_main()
 
         $json_response = json_encode($response);
         mmcp_send_error($json_response);
-        exit();
+        return 0;
     }
 
     // Process the valid request
@@ -1327,7 +1498,7 @@ function mmcp_main()
 
         // If error, it was already sent by mmcp_handle_initialize;
         // either way, just exit immediately 'cause we're done here
-        exit();
+        return 0;
     }
 
     // All other requests require a valid session
@@ -1337,13 +1508,13 @@ function mmcp_main()
         $response = MMCP_DEFAULT_PROTOCOL_ERROR_OBJ();
         $response['id'] = $request_id;
         $response['error']['code'] = -32600;
-        $response['error']['message'] = 'Missing session ID. Initialize connection first.';
+        $response['error']['message'] = 'Missing session ID in header. Initialize connection first. ALL requests after initialize must include session ID header.';
 
         $json_response = json_encode($response);
         mmcp_send_error($json_response);
         mmcp_log_debug("Non-initialize request sent without session id: ".json_encode($request).
             "\n >>> Request headers: ".json_encode($_SERVER));
-        exit();
+        return 0;
     }
 
     // Verify the connection exists
@@ -1358,7 +1529,7 @@ function mmcp_main()
 
         $json_response = json_encode($response);
         mmcp_send_error($json_response);
-        exit();
+        return 0;
     }
 
     // Check protocol version consistency (only needed for 2025-06-18)
@@ -1380,7 +1551,7 @@ function mmcp_main()
             mmcp_send_error($json_response);
             // can match a request, so log it as a response too
             mmcp_log_access($cid, $request_id, $json_response, false);
-            exit();
+            return 0;
         }
 
         // protocol version must also match
@@ -1397,23 +1568,19 @@ function mmcp_main()
             mmcp_send_error($json_response);
             // can match a request, so log it as a response too
             mmcp_log_access($cid, $request_id, $json_response, false);
-            exit();
+            return 0;
         }
     }
 
     // Special handling for the initialized notification
     if ($request_method === 'notifications/initialized')
     {
-        // This notification confirms the client has processed initialization
+        // Process the notification only if we're waiting for it
         if ($connection['status'] === MMCP_CID_INIT)
         {
             mmcp_update_connection($cid, MMCP_CID_OPEN);
-            // Process the notification only if we're waiting for it
-            mmcp_process_request($request, $cid);
+            $connection = mmcp_verify_connection($cid);
         }
-
-        // Ignore the notification if we're not waiting on it
-        exit();
     }
 
     // All other requests require a fully open connection
@@ -1429,14 +1596,244 @@ function mmcp_main()
         mmcp_send_error($json_response);
         // can match a request, so log it as a response too
         mmcp_log_access($cid, $request_id, $json_response, false);
-        exit();
+        return 0;
     }
 
-    // FINALLY! Process the request based on method
-    mmcp_process_request($request, $cid);
+    // FINALLY! Process the request
+    $exitcode = mmcp_process_request($request, $cid);
 
-} // end mmcp_main()
+    return $exitcode;
 
+} // end mmcp_main_http()
+
+
+// ---------- MAIN (STDIO) ---------- //
+
+function mmcp_main_stdio()
+{
+    // ---------- globals & other variables ---------- //
+
+    global $MMCP_MCP_ENDPOINT, $MMCP_ACCESS_LOG_FILE, $MMCP_ERROR_LOG_FILE;
+    global $MMCP_TRANSPORT_METHOD, $MMCP_CURRENT_PROTOCOL_VERSION;
+    global $MMCP_MAX_CONNECTION_UPTIME, $MMCP_REQUEST_TIMEOUT;
+    global $MMCP_GLOBAL_CID;
+
+    $exitcode = 0;
+
+    // ---------- processing setup ---------- //
+
+    // limit entire script runtime to twice max connection time, just in case
+    set_time_limit($MMCP_MAX_CONNECTION_UPTIME * 2);
+
+    // prepare to keep track of time spent executing
+    $starttime = time();
+    $currtime = $starttime;
+    $connecttime = 0;
+
+    // set the loop to note every minute (or less) without a message
+    if ($MMCP_REQUEST_TIMEOUT <= MMCP_ONE_MINUTE_IN_SECONDS)
+        $stream_timeout = $MMCP_REQUEST_TIMEOUT;
+    else
+        $stream_timeout = MMCP_ONE_MINUTE_IN_SECONDS;
+
+    stream_set_timeout(STDIN, $stream_timeout);
+    $timeouts_idle = 0;
+
+    ob_implicit_flush(TRUE); // always flush, even implicitly
+
+    // ---------- processing loop ---------- //
+
+    // start the actual processing loop
+    while ((!feof(STDIN)) and ($connecttime < $MMCP_MAX_CONNECTION_UPTIME))
+    {
+        // pause (for duration set by stream_set_timeout)
+        // until we pull the next line of data
+        $linedata = fgets(STDIN);
+
+        // check for idle timeout
+        $metadata = stream_get_meta_data(STDIN);
+        $timedout = ($metadata['timed_out'] == TRUE);
+
+        // note idle timeout
+        if ($timedout)
+        {
+            $timeouts_idle++;
+            $seconds_idle = $stream_timeout * $timeouts_idle;
+            $minutes_idle = floor($seconds_idle / 60);
+            $msg = "No STDIO messages from [CID:$MMCP_GLOBAL_CID] for ". $stream_timeout
+                ." seconds";
+            if ($minutes_idle > 2)
+                $msg .= " ($minutes_idle minutes total)";
+            elseif (($seconds_idle >= 60) and ($seconds_idle < 80))
+                $msg .= ' (one minute total)';
+            elseif (($seconds_idle >= 80) and ($seconds_idle < 110))
+                $msg .= ' (about one minute total)';
+            elseif ($seconds_idle == 120)
+                $msg .= ' (2 minutes total)';
+            else
+                $msg .= ' (about 2 minutes total)'; 
+            // write message to debugger
+            mmcp_log_debug($msg);
+            // continue the loop, since we know we timed out rather than got data
+            continue;
+        }
+
+        // if connection time exceeds max allowed, exit
+        $currtime = time();
+        $connecttime = $currtime - $starttime;
+        if ($connecttime >= $MMCP_MAX_CONNECTION_UPTIME)
+            break;
+
+        // if no timeout, we have a message; carry on
+        $timeouts_idle = 0; // reset
+
+        // last check to make sure the input is valid
+        if ($linedata === FALSE)
+        {
+            // no line data usually means input stream was closed by client
+            mmcp_log_debug('EOF detected on STDIN - client presumed disconnected.');
+            break;
+        }
+
+        // let's start validating the message
+        if (empty($linedata))
+        {
+            // nothing to do with an empty body except report it
+            $error = ['error' => 'Empty request body'];
+            mmcp_send_error(json_encode($error));
+            continue;
+        }
+
+        $validation = mmcp_validate_request($linedata);
+
+        // ensure it's at least parseable JSON
+        if ($validation === null)
+        {
+            // Invalid JSON - log the raw input since we can't parse it
+            mmcp_log_access($MMCP_GLOBAL_CID, null, $linedata, true);
+
+            // Send error response, then continue to wait for next message
+            $error = ['error' => 'Invalid JSON in request body'];
+            $json_error = json_encode($error);
+            mmcp_send_error($json_error);
+            continue;
+        }
+
+        // Extract request ID if available (even from invalid requests)
+        $rid = $validation['data']['id'] ?? null;
+
+        // Log the valid JSON request with its ID
+        mmcp_log_access($MMCP_GLOBAL_CID, $rid, json_encode($validation['data']), true);
+
+        // If not a valid request, respond appropriately
+        if ($validation['error'] !== 0) {
+            // Invalid request structure
+            $error_code = $validation['error'];
+            $error_msg = MMCP_ERROR_TABLE[$error_code] ?? 'Unknown error';
+
+            $response = MMCP_DEFAULT_PROTOCOL_ERROR_OBJ();
+            $response['id'] = $rid;
+            $response['error']['code'] = $error_code;
+            $response['error']['message'] = $error_msg;
+
+            $json_response = json_encode($response);
+            mmcp_send_error($json_response);
+            continue;
+        }
+
+        // Process the valid request
+        $request = $validation['data'];
+        $request_id = $rid;
+        $request_method = $request['method'];
+
+        // Special handling for initialization - no session required
+        if ($request_method === 'initialize')
+        {
+            $success = mmcp_handle_initialize($request);
+
+            // If error, it was already sent by mmcp_handle_initialize;
+            // either way, just go to next message 'cause we're done here
+            continue;
+        }
+
+        // All other requests require a valid session;
+        // must initialize before accepting anything else
+        if ($MMCP_GLOBAL_CID == -1)
+        {
+            $response = MMCP_DEFAULT_PROTOCOL_ERROR_OBJ();
+            $response['id'] = $request_id;
+            $response['error']['code'] = -32600;
+            $response['error']['message'] = 'Connection not established. Initialize connection first.';
+
+            $json_response = json_encode($response);
+            mmcp_send_error($json_response);
+            mmcp_log_debug("Request sent with no established connection: ".json_encode($request));
+            continue;
+        }
+
+        // Verify the connection is still open
+        $connection = mmcp_verify_connection($MMCP_GLOBAL_CID);
+        if (!$connection)
+        {
+            $response = MMCP_DEFAULT_PROTOCOL_ERROR_OBJ();
+            $response['id'] = $request_id;
+            $response['error']['code'] = -32600;
+            $response['error']['message'] = 'Invalid or closed session.';
+
+            $json_response = json_encode($response);
+            mmcp_send_error($json_response);
+            continue;
+        }
+
+        // Special handling for the initialized notification
+        if ($request_method === 'notifications/initialized')
+        {
+            // Specially process the notification only if we're waiting for it
+            if ($connection['status'] === MMCP_CID_INIT)
+            {
+                mmcp_update_connection($MMCP_GLOBAL_CID, MMCP_CID_OPEN);
+                $connection = mmcp_verify_connection($MMCP_GLOBAL_CID);
+            }
+        }
+
+        // All other requests require a fully open connection
+        if ($connection['status'] !== MMCP_CID_OPEN)
+        {
+            $response = MMCP_DEFAULT_PROTOCOL_ERROR_OBJ();
+            $response['id'] = $request_id;
+            $response['error']['code'] = -32600;
+            $response['error']['message'] = 'Connection not fully initialized. Send notifications/initialized first.';
+
+            $json_response = json_encode($response);
+            mmcp_send_error($json_response);
+            // can match a request, so log it as a response too
+            mmcp_log_access($MMCP_GLOBAL_CID, $request_id, $json_response, false);
+            continue;
+        }
+
+        // FINALLY! Process the message
+        $exitcode = mmcp_process_request($request, $MMCP_GLOBAL_CID);
+        $currtime = time();
+        $connecttime = $currtime - $starttime;
+    }
+
+    // ---------- script finished ---------- //
+
+    // check to see if connection time max was reached
+    if ($connecttime >= $MMCP_MAX_CONNECTION_UPTIME)
+    {
+        $msg = "Client [CID:$MMCP_GLOBAL_CID] reached max connection uptime ($MMCP_MAX_CONNECTION_UPTIME seconds)... stopping server"; 
+        mmcp_log_debug($msg);
+    }
+
+    $newcode = mmcp_shutdown_stdio();
+
+    if ($exitcode == 0)
+        $exitcode = $newcode;
+
+    return $exitcode;
+
+} // end mmcp_main_stdio()
 
 
 
@@ -1476,10 +1873,21 @@ function health_endpoint($method)
     mmcp_send_response(json_encode($output));
 }
 
+// only used for long-running tools to let the
+// system know its maximum expected runtime
+// function mmcp_tool_timing_add_numbers()
+//     return 10;
+
 // registry function for the tool "add_numbers";
 // note that this definition has a title and an
 // output schema, which can both be later dropped
-// as the protocol version demands
+// as the protocol version demands; if the tool
+// were expected to possibly run for awhile, we'd
+// note that in the tool description, would add
+// a call to mmcp_establish_tooltime($seconds)
+// at the beginning of the tool, and would add an
+// entry for mmcp_tool_timing_
+//
 function mmcp_tool_registry_add_numbers()
 {
     // neither input nor output schemas require a
@@ -1544,6 +1952,16 @@ function mmcp_tool_registry_add_numbers()
 // schema, the result has BOTH unstructured
 // (normal) content, and a structured content
 // which can be dropped as the protocol demands
+//
+// if the tool is expected to possibly run for an
+// extended period, it should not only be noted in
+// the tool's description, then the tool function
+// should also add a call to:
+//     mmcp_establish_tooltime($seconds)
+// at the beginning of the tool's code; tools can
+// use the mmcp_log_ functions, but otherwise
+// should NOT output anything beyond return values
+//
 function add_numbers($params)
 {
     // start building the structure of the result
@@ -1617,6 +2035,5 @@ function add_numbers($params)
  *****************************************************************************
  ***************************** END EXAMPLE CODE ******************************
  *****************************************************************************/
-
 
 ?>
