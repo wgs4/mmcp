@@ -54,8 +54,8 @@
  *    ... 2025-03-26/server/utilities/pagination).
  *
  * To create your own custom server, create your server code file
- * and "include 'mini-mcp-server.php'" at the top of your file.
- * Be sure that every tool has both the tool function, and a
+ * and "include 'mmcp-server.php'" at the top of the file. Be
+ * sure that every tool has both the tool function, and a
  * corresponding "mmcp_tool_registry_<funcname>" function to
  * "register" the tool (just returning the data necessary to
  * fulfill the "tools/list" request.) In tool descriptions for
