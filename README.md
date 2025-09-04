@@ -1,11 +1,12 @@
 # mmcp
 Mini-MCP Server: A minimalist MCP server written in procedural PHP and stripped down to just what we need.
 
-**NEWEST:** v. 1.1.0
+**NEWEST:** v. 1.1.1
 
 Changes:
  - Added ability to operate via STDIO
  - Long-running tools can communicate this to the client (somewhat)
+ - Changed name of server file to mmcp-server.php
 
 To-do:
  - Allow server tools to send progress notifications in STDIO
@@ -21,4 +22,4 @@ Limitations:
  - Follows protocol rigidly (custom endpoints allow slight violations)
  - No pagination of data
 
-Usage: For now, refer to the header comments of the main file (mini-mcp-server.php) for usage
+Usage: For now, refer to the header comments of the main file (mmcp-server.php) for usage
