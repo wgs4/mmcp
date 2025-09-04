@@ -3,7 +3,7 @@
 /*
  *        (( MMCP ))
  *      Mini-MCP Server
- *       version 1.1.0
+ *       version 1.1.1
  *
  * A simplified MCP Server for PHP
  *
@@ -107,6 +107,8 @@
  * v.1.0.0 - Completed 2025-08-13 by RDJ (rodjacksonx@gmail.com, rod@wgsusa.com)
  *
  * v.1.1.0 - Added STDIO transport; completed 2025-09-04 by RDJ
+ * v.1.1.1 - Changed filename from mini-mcp-server.php to mmcp-server.php,
+ *    changed 2025-09-04 by RDJ
  *
  *
  */
@@ -126,7 +128,7 @@ ini_set('display_errors', 1);
 // ---------- Server Constants ---------- //
 
 const TEST_API_ENDPOINT = 'https://wgsapi.com/xtuple-api/xtuple-test.php?apikey=';
-const MMCP_DEFAULT_MCP_ENDPOINT = '/mini-mcp-server.php'; // should just be the path after the hostname
+const MMCP_DEFAULT_MCP_ENDPOINT = '/mmcp-server.php'; // should just be the path after the hostname
 
 const MMCP_ONE_DAY_IN_SECONDS = 86400; // 86,400 seconds = 1440 minutes = 24 hours
 const MMCP_ONE_MINUTE_IN_SECONDS = 60;
@@ -182,8 +184,8 @@ const MMCP_CID_OPEN = 'O'; // connection is open and ready for use
 const MMCP_CID_CLOSED = 'C'; // connection is closed and inaccessible
 const MMCP_CID_INIT = 'I'; // in the process of being initialized
 
-const MMCP_SERVER_NAME_DEFAULT = 'Mini MCP Server';
-const MMCP_SERVER_VERSION_DEFAULT   = '1.1.0';
+const MMCP_SERVER_NAME_DEFAULT = 'Mini-MCP Server';
+const MMCP_SERVER_VERSION_DEFAULT   = '1.1.1';
 
 const MMCP_ACCESS_LOG_FILENAME = __DIR__ . '/mmcp-access.log';
 const MMCP_ERROR_LOG_FILENAME = __DIR__ . '/mmcp-error.log';
