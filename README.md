@@ -15,9 +15,9 @@ To-do:
 
 Limitations:
  - Only later protocols (2025-03-26 and 2025-06-18)
- - No SSE endpoint, no continuous communication channel
+ - No SSE endpoint, no continuous communication via HTTP
  - No OAuth or other built-in authorization
- - Only HTTP, no STDIO transport method
+ - ~~Only HTTP, no STDIO transport method~~
  - Only tools; no resources, prompts, etc.
  - Follows protocol rigidly (custom endpoints allow slight violations)
  - No pagination of data
