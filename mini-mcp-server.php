@@ -106,7 +106,7 @@
  *
  * v.1.0.0 - Completed 2025-08-13 by RDJ (rodjacksonx@gmail.com, rod@wgsusa.com)
  *
- * v.1.1.0 - Added STDIO transport; completed 2025-??-?? by RDJ
+ * v.1.1.0 - Added STDIO transport; completed 2025-09-04 by RDJ
  *
  *
  */
@@ -183,7 +183,7 @@ const MMCP_CID_CLOSED = 'C'; // connection is closed and inaccessible
 const MMCP_CID_INIT = 'I'; // in the process of being initialized
 
 const MMCP_SERVER_NAME_DEFAULT = 'Mini MCP Server';
-const MMCP_SERVER_VERSION_DEFAULT   = '1.0.0';
+const MMCP_SERVER_VERSION_DEFAULT   = '1.1.0';
 
 const MMCP_ACCESS_LOG_FILENAME = __DIR__ . '/mmcp-access.log';
 const MMCP_ERROR_LOG_FILENAME = __DIR__ . '/mmcp-error.log';
@@ -1621,6 +1621,11 @@ function mmcp_main_stdio()
     $exitcode = 0;
 
     // ---------- processing setup ---------- //
+
+    // deal with buffering
+    //ini_set('output_buffering', '0');
+    //ini_set('zlib.output_compression', '0');
+    stream_set_write_buffer(STDOUT, 0);
 
     // limit entire script runtime to twice max connection time, just in case
     set_time_limit($MMCP_MAX_CONNECTION_UPTIME * 2);
